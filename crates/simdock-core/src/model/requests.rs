@@ -9,9 +9,9 @@ pub struct InstallRequest {
 }
 
 #[derive(Debug, Clone)]
-/// 创建模拟器 profile 的请求。
+/// 创建模拟器profile的请求。
 ///
-/// Profile 是运行时、设备模板和用户命名配置的组合。
+/// Profile是运行时、设备模板和用户命名配置的组合。
 pub struct CreateProfileRequest {
     pub name: String,
     pub platform: Platform,

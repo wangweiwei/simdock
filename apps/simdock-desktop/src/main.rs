@@ -1,5 +1,6 @@
 use std::{
-    ffi::OsStr,
+    env,
+    ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
     time::Duration,
@@ -15,10 +16,12 @@ use iced::{
     theme::Palette,
     time,
     widget::{
-        button, column, container, pick_list, row, scrollable,
+        button, checkbox, column, container, opaque, pick_list, row, scrollable,
         scrollable::{Direction, Scrollbar},
+        stack,
     },
 };
+use serde::{Deserialize, Serialize};
 use simdock_core::{
     DoctorReport, InstallRequest, Platform, TaskEvent,
     provider::{PlatformProvider, android::AndroidProvider, ios::IosProvider},
@@ -33,6 +36,12 @@ const SYSTEM_CJK_FONT_PATHS: &[&str] = &[
     "/System/Library/Fonts/STHeiti Medium.ttc",
     "/System/Library/Fonts/STHeiti Light.ttc",
 ];
+const SYSTEM_MONO_FONT_PATHS: &[&str] = &[
+    "/System/Library/Fonts/Menlo.ttc",
+    "/System/Library/Fonts/SFNSMono.ttf",
+    "/System/Library/Fonts/Supplemental/PTMono.ttc",
+    "/System/Library/Fonts/Supplemental/Andale Mono.ttf",
+];
 const LANGUAGE_OPTIONS: [AppLanguage; 2] = [AppLanguage::Chinese, AppLanguage::English];
 const STEPPER_DOT_SIZE: u16 = 6;
 const STEPPER_LINE_HEIGHT: u16 = 1;
@@ -41,6 +50,9 @@ const STEPPER_EDGE_INSET: u16 = 0;
 const STEPPER_CONTENT_SPACING: u16 = 14;
 const STEPPER_PADDING_VERTICAL: u16 = 22;
 const STEPPER_PADDING_HORIZONTAL: u16 = 10;
+const OPERATION_SNAPSHOT_FILE: &str = "operation-snapshot.json";
+const OPERATION_SNAPSHOT_VERSION: u16 = 1;
+const MAX_INSTALL_LOGS: usize = 120;
 
 pub fn main() -> iced::Result {
     prepare_system_fonts();
@@ -49,6 +61,9 @@ pub fn main() -> iced::Result {
 
     if let Some(font_bytes) = load_system_cjk_font() {
         app = app.font(font_bytes).default_font(UI_FONT);
+    }
+    if let Some(font_bytes) = load_system_mono_font() {
+        app = app.font(font_bytes);
     }
 
     app.theme(app_theme)
@@ -78,6 +93,8 @@ struct DoctorApp {
     theme_mode: ThemeMode,
     installs: InstallTasks,
     xcode_license_action: XcodeLicenseAction,
+    opening_platform: Option<Platform>,
+    cleanup_dialog: Option<CleanupDialog>,
     spinner_frame: usize,
 }
 
@@ -105,13 +122,13 @@ enum XcodeLicenseOutcome {
     Cancelled,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct InstallTasks {
     ios: InstallTaskView,
     android: InstallTaskView,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct InstallTaskView {
     state: InstallState,
     progress: f32,
@@ -119,13 +136,21 @@ struct InstallTaskView {
     logs: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum InstallState {
     Idle,
     Running,
     Opening,
     Completed,
+    Interrupted,
     Failed(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OperationSnapshot {
+    version: u16,
+    active_tab: Platform,
+    installs: InstallTasks,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +168,34 @@ enum InstallStreamEvent {
 }
 
 #[derive(Debug, Clone)]
+struct CleanupDialog {
+    platform: Platform,
+    items: Vec<CleanupItemView>,
+    running: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CleanupItemView {
+    kind: CleanupItemKind,
+    checked: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CleanupItemKind {
+    DownloadCache,
+    LogsAndSnapshot,
+    ManagedJavaRuntime,
+    AndroidVirtualDevices,
+    AndroidSdk,
+}
+
+#[derive(Debug, Clone)]
+struct CleanupOutcome {
+    removed_paths: usize,
+}
+
+#[derive(Debug, Clone)]
 enum Message {
     RefreshRequested,
     TabSelected(Platform),
@@ -152,6 +205,11 @@ enum Message {
     InstallEvent(Platform, InstallStreamEvent),
     OpenSimulatorRequested(Platform),
     OpenSimulatorFinished(Platform, Result<(), String>),
+    ManageInstalledContentRequested(Platform),
+    CleanupItemToggled(CleanupItemKind, bool),
+    CleanupCancelled,
+    CleanupConfirmed,
+    CleanupFinished(Result<CleanupOutcome, String>),
     XcodeLicenseInstallAcceptFinished(Platform, Result<XcodeLicenseOutcome, String>),
     SpinnerTick,
     DoctorLoaded(Result<DoctorSnapshot, String>),
@@ -159,7 +217,7 @@ enum Message {
 
 impl DoctorApp {
     fn loading() -> Self {
-        Self {
+        let mut app = Self {
             status: LoadState::Loading,
             snapshot: None,
             active_tab: Platform::Ios,
@@ -167,8 +225,13 @@ impl DoctorApp {
             theme_mode: ThemeMode::System,
             installs: InstallTasks::default(),
             xcode_license_action: XcodeLicenseAction::Idle,
+            opening_platform: None,
+            cleanup_dialog: None,
             spinner_frame: 0,
-        }
+        };
+
+        app.restore_operation_snapshot();
+        app
     }
 
     fn is_loading(&self) -> bool {
@@ -201,6 +264,34 @@ impl DoctorApp {
         self.installs.ios.is_busy()
             || self.installs.android.is_busy()
             || self.xcode_license_action.is_running()
+            || self.opening_platform.is_some()
+    }
+
+    fn restore_operation_snapshot(&mut self) {
+        let Ok(snapshot) = load_operation_snapshot() else {
+            return;
+        };
+        if snapshot.version != OPERATION_SNAPSHOT_VERSION {
+            return;
+        }
+
+        self.active_tab = snapshot.active_tab;
+        self.installs = snapshot.installs;
+        self.installs.sanitize_restored_snapshot();
+        self.installs.mark_interrupted(AppLanguage::Chinese);
+        self.persist_operation_snapshot();
+    }
+
+    fn persist_operation_snapshot(&self) {
+        let snapshot = OperationSnapshot {
+            version: OPERATION_SNAPSHOT_VERSION,
+            active_tab: self.active_tab,
+            installs: self.installs.snapshot_for_install_only(),
+        };
+
+        if let Err(error) = save_operation_snapshot(&snapshot) {
+            eprintln!("failed to persist operation snapshot: {error}");
+        }
     }
 }
 
@@ -216,6 +307,78 @@ impl Default for InstallTasks {
             ios: InstallTaskView::idle(Platform::Ios),
             android: InstallTaskView::idle(Platform::Android),
         }
+    }
+}
+
+impl InstallTasks {
+    fn mark_interrupted(&mut self, language: AppLanguage) {
+        self.ios.mark_interrupted(language);
+        self.android.mark_interrupted(language);
+    }
+
+    fn sanitize_restored_snapshot(&mut self) {
+        self.ios.sanitize_install_snapshot(Platform::Ios);
+        self.android.sanitize_install_snapshot(Platform::Android);
+    }
+
+    fn snapshot_for_install_only(&self) -> Self {
+        let mut snapshot = Self {
+            ios: self.ios.snapshot_for_install_only(Platform::Ios),
+            android: self.android.snapshot_for_install_only(Platform::Android),
+        };
+        snapshot.sanitize_restored_snapshot();
+        snapshot
+    }
+}
+
+impl CleanupDialog {
+    fn new(platform: Platform) -> Self {
+        let mut items = vec![
+            CleanupItemView {
+                kind: CleanupItemKind::DownloadCache,
+                checked: true,
+            },
+            CleanupItemView {
+                kind: CleanupItemKind::LogsAndSnapshot,
+                checked: true,
+            },
+        ];
+
+        if platform == Platform::Android {
+            items.extend([
+                CleanupItemView {
+                    kind: CleanupItemKind::ManagedJavaRuntime,
+                    checked: false,
+                },
+                CleanupItemView {
+                    kind: CleanupItemKind::AndroidVirtualDevices,
+                    checked: false,
+                },
+                CleanupItemView {
+                    kind: CleanupItemKind::AndroidSdk,
+                    checked: false,
+                },
+            ]);
+        }
+
+        Self {
+            platform,
+            items,
+            running: false,
+            error: None,
+        }
+    }
+
+    fn selected_items(&self) -> Vec<CleanupItemKind> {
+        self.items
+            .iter()
+            .filter(|item| item.checked)
+            .map(|item| item.kind)
+            .collect()
+    }
+
+    fn has_selected_items(&self) -> bool {
+        self.items.iter().any(|item| item.checked)
     }
 }
 
@@ -241,19 +404,16 @@ impl InstallTaskView {
         self.is_running() || self.is_opening()
     }
 
+    fn is_interrupted(&self) -> bool {
+        matches!(self.state, InstallState::Interrupted)
+    }
+
     fn start(&mut self, platform: Platform, language: AppLanguage) {
         self.state = InstallState::Running;
         self.progress = 0.0;
         self.current_step = i18n::install_starting_message(platform, language);
         self.logs.clear();
-    }
-
-    fn start_open(&mut self, platform: Platform, language: AppLanguage) {
-        self.state = InstallState::Opening;
-        self.progress = 100.0;
-        self.current_step = i18n::opening_simulator_message(platform, language);
-        self.logs.clear();
-        self.push_log(self.current_step.clone());
+        self.push_log(i18n::install_starting_message(platform, AppLanguage::English).to_string());
     }
 
     fn finish(&mut self, result: Result<(), String>, language: AppLanguage) {
@@ -266,26 +426,11 @@ impl InstallTaskView {
                 }
             }
             Err(error) => {
+                let log_error = i18n::install_message(&error, AppLanguage::English);
                 let error = i18n::install_message(&error, language);
                 self.state = InstallState::Failed(error.clone());
                 self.current_step = error;
-            }
-        }
-    }
-
-    fn finish_open(&mut self, result: Result<(), String>, language: AppLanguage) {
-        match result {
-            Ok(()) => {
-                self.state = InstallState::Completed;
-                self.progress = 100.0;
-                self.current_step = i18n::simulator_opened_message(language).to_string();
-                self.push_log(self.current_step.clone());
-            }
-            Err(error) => {
-                let error = i18n::install_message(&error, language);
-                self.state = InstallState::Failed(error.clone());
-                self.current_step = error.clone();
-                self.push_log(error);
+                self.push_log(log_error);
             }
         }
     }
@@ -293,7 +438,61 @@ impl InstallTaskView {
     fn wait_for_xcode_license(&mut self, language: AppLanguage) {
         self.state = InstallState::Running;
         self.current_step = i18n::xcode_license_waiting_message(language).to_string();
-        self.push_log(self.current_step.clone());
+        self.push_log(i18n::xcode_license_waiting_message(AppLanguage::English));
+    }
+
+    fn clear_install_logs_for_open(&mut self) {
+        self.logs.clear();
+    }
+
+    fn start_open(&mut self, platform: Platform) {
+        self.state = InstallState::Opening;
+        self.progress = 100.0;
+        self.current_step = open_log_message(platform, "opening");
+        self.logs.clear();
+        self.push_transient_log(self.current_step.clone());
+    }
+
+    fn finish_open(
+        &mut self,
+        platform: Platform,
+        result: Result<(), String>,
+        language: AppLanguage,
+    ) {
+        self.state = InstallState::Completed;
+        self.progress = 100.0;
+        match result {
+            Ok(()) => {
+                self.current_step = i18n::install_completed_message(language).to_string();
+                self.push_transient_log(open_log_message(platform, "opened"));
+            }
+            Err(error) => {
+                self.current_step = i18n::install_completed_message(language).to_string();
+                self.push_transient_log(format!(
+                    "Failed to open {}: {error}",
+                    open_platform_name(platform)
+                ));
+            }
+        }
+    }
+
+    fn mark_interrupted(&mut self, language: AppLanguage) {
+        if self.is_running() {
+            self.state = InstallState::Interrupted;
+            let message = i18n::install_interrupted_message(language).to_string();
+            self.current_step = message.clone();
+            self.push_log(i18n::install_interrupted_message(AppLanguage::English));
+        }
+    }
+
+    fn snapshot_for_install_only(&self, platform: Platform) -> Self {
+        if self.is_opening() {
+            return Self::idle(platform);
+        }
+
+        let mut snapshot = self.clone();
+        snapshot.sanitize_install_snapshot(platform);
+        snapshot
     }
 
     fn apply_event(&mut self, event: TaskEvent, language: AppLanguage) {
@@ -301,35 +500,68 @@ impl InstallTaskView {
             TaskEvent::Started { title, .. } => {
                 self.state = InstallState::Running;
                 self.current_step = i18n::install_message(&title, language);
-                self.push_log(self.current_step.clone());
+                self.push_log(title);
             }
             TaskEvent::Progress { pct, message, .. } => {
                 self.progress = pct.clamp(0.0, 100.0);
                 self.current_step = i18n::install_message(&message, language);
-                self.push_log(self.current_step.clone());
+                self.push_log(message);
             }
             TaskEvent::Log { message, .. } => {
-                self.push_log(i18n::install_message(&message, language));
+                self.push_log(message);
             }
             TaskEvent::Finished { .. } => {
                 self.state = InstallState::Completed;
                 self.progress = 100.0;
                 self.current_step = i18n::install_completed_message(language).to_string();
-                self.push_log(self.current_step.clone());
+                self.push_log(i18n::install_completed_message(AppLanguage::English));
             }
             TaskEvent::Failed { error, .. } => {
+                let log_error = i18n::install_message(&error, AppLanguage::English);
                 let error = i18n::install_message(&error, language);
                 self.state = InstallState::Failed(error.clone());
                 self.current_step = error;
-                self.push_log(self.current_step.clone());
+                self.push_log(log_error);
             }
         }
     }
 
-    fn push_log(&mut self, message: String) {
-        self.logs.push(message);
-        if self.logs.len() > 40 {
+    fn push_log(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        if should_keep_install_log(&message) {
+            self.logs.push(message);
+        }
+        if self.logs.len() > MAX_INSTALL_LOGS {
             self.logs.remove(0);
+        }
+    }
+
+    fn push_transient_log(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        if !contains_cjk(&message) {
+            self.logs.push(message);
+        }
+        if self.logs.len() > MAX_INSTALL_LOGS {
+            self.logs.remove(0);
+        }
+    }
+
+    fn sanitize_install_snapshot(&mut self, platform: Platform) {
+        self.logs.retain(|log| should_keep_install_log(log));
+
+        if self.is_opening() || is_open_operation_text(&self.current_step) {
+            let logs = std::mem::take(&mut self.logs);
+            if matches!(self.state, InstallState::Completed) {
+                let mut task = Self::idle(platform);
+                task.state = InstallState::Completed;
+                task.progress = 100.0;
+                task.current_step =
+                    i18n::install_completed_message(AppLanguage::English).to_string();
+                task.logs = logs;
+                *self = task;
+            } else {
+                *self = Self::idle(platform);
+            }
         }
     }
 }
@@ -354,11 +586,19 @@ fn muted_text_color(dark: bool) -> Color {
     }
 }
 
-fn detail_text_color(dark: bool) -> Color {
+fn warning_text_color(dark: bool) -> Color {
     if dark {
-        Color::from_rgb8(0xC2, 0xCB, 0xD5)
+        Color::from_rgb8(0xFF, 0xCE, 0x73)
     } else {
-        Color::from_rgb8(0x4F, 0x5E, 0x6E)
+        Color::from_rgb8(0x9B, 0x61, 0x00)
+    }
+}
+
+fn error_text_color(dark: bool) -> Color {
+    if dark {
+        Color::from_rgb8(0xFF, 0xA3, 0x91)
+    } else {
+        Color::from_rgb8(0xB2, 0x47, 0x38)
     }
 }
 
@@ -415,6 +655,29 @@ fn app_style(_app: &DoctorApp, theme: &Theme) -> application::Appearance {
     }
 }
 
+fn operation_snapshot_path() -> Result<PathBuf, String> {
+    let paths = AppPaths::detect().map_err(|error| error.to_string())?;
+    Ok(paths.app_support_dir.join(OPERATION_SNAPSHOT_FILE))
+}
+
+fn load_operation_snapshot() -> Result<OperationSnapshot, String> {
+    let path = operation_snapshot_path()?;
+    let data = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&data).map_err(|error| error.to_string())
+}
+
+fn save_operation_snapshot(snapshot: &OperationSnapshot) -> Result<(), String> {
+    let path = operation_snapshot_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let data = serde_json::to_vec_pretty(snapshot).map_err(|error| error.to_string())?;
+    let temp_path = path.with_extension("json.tmp");
+    fs::write(&temp_path, data).map_err(|error| error.to_string())?;
+    fs::rename(temp_path, path).map_err(|error| error.to_string())
+}
+
 fn load_system_cjk_font() -> Option<&'static [u8]> {
     find_system_font_file("PingFang.ttc")
         .and_then(|path| std::fs::read(path).ok())
@@ -423,6 +686,13 @@ fn load_system_cjk_font() -> Option<&'static [u8]> {
                 .iter()
                 .find_map(|path| std::fs::read(path).ok())
         })
+        .map(|bytes| bytes.leak() as &'static [u8])
+}
+
+fn load_system_mono_font() -> Option<&'static [u8]> {
+    SYSTEM_MONO_FONT_PATHS
+        .iter()
+        .find_map(|path| std::fs::read(path).ok())
         .map(|bytes| bytes.leak() as &'static [u8])
 }
 
@@ -459,6 +729,7 @@ fn update(app: &mut DoctorApp, message: Message) -> Task<Message> {
         }
         Message::TabSelected(platform) => {
             app.active_tab = platform;
+            app.persist_operation_snapshot();
             Task::none()
         }
         Message::LanguageSelected(language) => {
@@ -470,31 +741,108 @@ fn update(app: &mut DoctorApp, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::InstallRequested(platform) => {
+            app.cleanup_dialog = None;
             let language = app.language;
             app.install_task_mut(platform).start(platform, language);
+            app.active_tab = platform;
+            app.persist_operation_snapshot();
             Task::run(run_install_stream(platform), move |event| {
                 Message::InstallEvent(platform, event)
             })
         }
         Message::OpenSimulatorRequested(platform) => {
-            let language = app.language;
-            app.install_task_mut(platform)
-                .start_open(platform, language);
-            Task::perform(open_simulator(platform), move |result| {
-                Message::OpenSimulatorFinished(platform, result)
-            })
+            if app.opening_platform.is_none() && !app.install_task(platform).is_busy() {
+                app.active_tab = platform;
+                app.opening_platform = Some(platform);
+                app.install_task_mut(platform).clear_install_logs_for_open();
+                app.persist_operation_snapshot();
+                app.install_task_mut(platform).start_open(platform);
+                Task::perform(open_simulator(platform), move |result| {
+                    Message::OpenSimulatorFinished(platform, result)
+                })
+            } else {
+                Task::none()
+            }
         }
         Message::OpenSimulatorFinished(platform, result) => {
-            let language = app.language;
-            app.install_task_mut(platform).finish_open(result, language);
+            if app.opening_platform == Some(platform) {
+                app.opening_platform = None;
+                let language = app.language;
+                app.install_task_mut(platform)
+                    .finish_open(platform, result, language);
+            }
             Task::none()
         }
+        Message::ManageInstalledContentRequested(platform) => {
+            if !app.install_task(platform).is_busy() {
+                app.cleanup_dialog = Some(CleanupDialog::new(platform));
+            }
+            Task::none()
+        }
+        Message::CleanupItemToggled(kind, checked) => {
+            if let Some(dialog) = &mut app.cleanup_dialog {
+                if !dialog.running {
+                    if let Some(item) = dialog.items.iter_mut().find(|item| item.kind == kind) {
+                        item.checked = checked;
+                        dialog.error = None;
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::CleanupCancelled => {
+            if !matches!(app.cleanup_dialog.as_ref(), Some(dialog) if dialog.running) {
+                app.cleanup_dialog = None;
+            }
+            Task::none()
+        }
+        Message::CleanupConfirmed => {
+            let Some(dialog) = &mut app.cleanup_dialog else {
+                return Task::none();
+            };
+
+            if dialog.running {
+                return Task::none();
+            }
+
+            if !dialog.has_selected_items() {
+                dialog.error =
+                    Some(i18n::cleanup_empty_selection_message(app.language).to_string());
+                return Task::none();
+            }
+
+            let platform = dialog.platform;
+            let selected_items = dialog.selected_items();
+            dialog.running = true;
+            dialog.error = None;
+            Task::perform(cleanup_selected_items(platform, selected_items), |result| {
+                Message::CleanupFinished(result)
+            })
+        }
+        Message::CleanupFinished(result) => match result {
+            Ok(outcome) => {
+                if outcome.removed_paths > 0 {
+                    app.installs = InstallTasks::default();
+                }
+                app.cleanup_dialog = None;
+                load_doctor_task()
+            }
+            Err(error) => {
+                let language = app.language;
+                if let Some(dialog) = &mut app.cleanup_dialog {
+                    dialog.running = false;
+                    dialog.error = Some(i18n::cleanup_failed_message(&error, language));
+                }
+                Task::none()
+            }
+        },
         Message::InstallEvent(platform, event) => {
             let language = app.language;
 
             match event {
                 InstallStreamEvent::Event(event) => {
                     app.install_task_mut(platform).apply_event(event, language);
+                    app.persist_operation_snapshot();
                     Task::none()
                 }
                 InstallStreamEvent::Finished(result) => {
@@ -507,12 +855,14 @@ fn update(app: &mut DoctorApp, message: Message) -> Task<Message> {
                         app.install_task_mut(platform)
                             .wait_for_xcode_license(language);
                         app.xcode_license_action = XcodeLicenseAction::Running;
+                        app.persist_operation_snapshot();
                         return Task::perform(accept_xcode_license(language), move |result| {
                             Message::XcodeLicenseInstallAcceptFinished(platform, result)
                         });
                     }
 
                     app.install_task_mut(platform).finish(result, language);
+                    app.persist_operation_snapshot();
                     Task::none()
                 }
             }
@@ -524,22 +874,32 @@ fn update(app: &mut DoctorApp, message: Message) -> Task<Message> {
             match result {
                 Ok(XcodeLicenseOutcome::Accepted) => {
                     app.install_task_mut(platform).start(platform, language);
+                    app.active_tab = platform;
+                    app.persist_operation_snapshot();
                     Task::run(run_install_stream(platform), move |event| {
                         Message::InstallEvent(platform, event)
                     })
                 }
                 Ok(XcodeLicenseOutcome::Cancelled) => {
                     app.install_task_mut(platform).finish(
-                        Err(i18n::xcode_license_cancelled_message(language).to_string()),
+                        Err(
+                            i18n::xcode_license_cancelled_message(AppLanguage::English)
+                                .to_string(),
+                        ),
                         language,
                     );
+                    app.persist_operation_snapshot();
                     Task::none()
                 }
                 Err(error) => {
                     app.install_task_mut(platform).finish(
-                        Err(i18n::xcode_license_command_failed(&error, language)),
+                        Err(i18n::xcode_license_command_failed(
+                            &error,
+                            AppLanguage::English,
+                        )),
                         language,
                     );
+                    app.persist_operation_snapshot();
                     Task::none()
                 }
             }
@@ -599,12 +959,13 @@ fn view(app: &DoctorApp) -> Element<'_, Message> {
         active_report,
         app.language,
         dark,
+        app.opening_platform == Some(app.active_tab),
         app.spinner_frame,
     );
 
     let content = column![header, status_banner, tab_bar, install_panel].spacing(20);
 
-    scrollable(
+    let page: Element<'_, Message> = scrollable(
         container(content.padding(28).spacing(24))
             .width(Length::Fill)
             .center_x(Length::Fill),
@@ -613,7 +974,13 @@ fn view(app: &DoctorApp) -> Element<'_, Message> {
         Scrollbar::new().width(18).scroller_width(8).margin(0),
     ))
     .style(main_scrollbar_style)
-    .into()
+    .into();
+
+    if let Some(dialog) = &app.cleanup_dialog {
+        stack![page, cleanup_dialog_overlay(dialog, app.language, dark)].into()
+    } else {
+        page
+    }
 }
 
 fn top_right_controls(app: &DoctorApp, dark: bool) -> Element<'_, Message> {
@@ -752,14 +1119,17 @@ fn install_panel<'a>(
     report: Option<&'a DoctorReport>,
     language: AppLanguage,
     dark: bool,
+    opening: bool,
     spinner_frame: usize,
 ) -> Element<'a, Message> {
     let simulator_ready =
         matches!(task.state, InstallState::Completed) || report.is_some_and(|report| report.ready);
-    let action_label = if task.is_opening() {
+    let action_label = if opening {
         i18n::action_opening_label(language)
     } else if task.is_running() {
         i18n::action_installing_label(language)
+    } else if task.is_interrupted() {
+        i18n::action_continue_install_label(language)
     } else if simulator_ready {
         i18n::action_open_simulator_label(language)
     } else {
@@ -769,7 +1139,7 @@ fn install_panel<'a>(
     let mut action = button(text(action_label).size(15))
         .padding([12, 20])
         .style(primary_button_style);
-    if !task.is_busy() {
+    if !task.is_busy() && !opening {
         action = if simulator_ready {
             action.on_press(Message::OpenSimulatorRequested(platform))
         } else {
@@ -781,9 +1151,14 @@ fn install_panel<'a>(
         row![
             column![
                 text(i18n::install_panel_title(platform, language)).size(22),
-                text(i18n::install_hint(platform, language))
-                    .size(15)
-                    .color(muted_text_color(dark)),
+                row![
+                    text(i18n::install_hint(platform, language))
+                        .size(15)
+                        .color(muted_text_color(dark)),
+                    manage_installed_content_link(platform, task.is_busy() || opening, language),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
             ]
             .spacing(6)
             .width(Length::Fill),
@@ -801,6 +1176,100 @@ fn install_panel<'a>(
         .width(Length::Fill)
         .style(section_card)
         .into()
+}
+
+fn manage_installed_content_link(
+    platform: Platform,
+    disabled: bool,
+    language: AppLanguage,
+) -> Element<'static, Message> {
+    let mut link = button(text(i18n::manage_installed_content_label(language)).size(15))
+        .padding([0, 0])
+        .style(link_button_style);
+
+    if !disabled {
+        link = link.on_press(Message::ManageInstalledContentRequested(platform));
+    }
+
+    link.into()
+}
+
+fn cleanup_dialog_overlay<'a>(
+    dialog: &'a CleanupDialog,
+    language: AppLanguage,
+    dark: bool,
+) -> Element<'a, Message> {
+    let mut checklist = column![].spacing(12);
+    for item in &dialog.items {
+        let kind = item.kind;
+        let mut row = checkbox(i18n::cleanup_item_label(kind, language), item.checked)
+            .text_size(14)
+            .size(18);
+
+        if !dialog.running {
+            row = row.on_toggle(move |checked| Message::CleanupItemToggled(kind, checked));
+        }
+
+        checklist = checklist.push(row);
+    }
+
+    let mut confirm_button = button(text(i18n::cleanup_confirm_button_label(language)).size(14))
+        .padding([10, 16])
+        .style(primary_button_style);
+    if !dialog.running {
+        confirm_button = confirm_button.on_press(Message::CleanupConfirmed);
+    }
+
+    let mut cancel_button = button(text(i18n::cleanup_cancel_button_label(language)).size(14))
+        .padding([10, 16])
+        .style(secondary_button_style);
+    if !dialog.running {
+        cancel_button = cancel_button.on_press(Message::CleanupCancelled);
+    }
+
+    let mut content = column![
+        text(i18n::cleanup_dialog_title(dialog.platform, language)).size(22),
+        text(i18n::cleanup_dialog_detail(dialog.platform, language))
+            .size(14)
+            .color(muted_text_color(dark)),
+        checklist,
+        text(i18n::cleanup_dialog_warning(language))
+            .size(13)
+            .color(warning_text_color(dark)),
+    ]
+    .spacing(16);
+
+    if dialog.running {
+        content = content.push(
+            text(i18n::cleanup_running_message(language))
+                .size(13)
+                .color(muted_text_color(dark)),
+        );
+    }
+
+    if let Some(error) = &dialog.error {
+        content = content.push(text(error.clone()).size(13).color(error_text_color(dark)));
+    }
+
+    content = content.push(
+        row![cancel_button, confirm_button]
+            .spacing(12)
+            .align_y(Alignment::Center),
+    );
+
+    opaque(
+        container(
+            container(content)
+                .padding(24)
+                .width(520)
+                .style(cleanup_dialog_card_style),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center(Length::Fill)
+        .style(cleanup_scrim_style),
+    )
+    .into()
 }
 
 fn install_stage_stepper(
@@ -947,25 +1416,25 @@ fn install_log_panel<'a>(
     language: AppLanguage,
     dark: bool,
 ) -> Element<'a, Message> {
-    let mut logs = column![
-        text(i18n::live_logs_title(language))
-            .size(15)
-            .color(muted_text_color(dark))
-    ]
-    .spacing(8);
+    let mut logs = column![].spacing(8);
+    let visible_logs = task
+        .logs
+        .iter()
+        .filter(|log| !contains_cjk(log))
+        .collect::<Vec<_>>();
 
-    if task.logs.is_empty() {
+    if visible_logs.is_empty() {
         logs = logs.push(
             text(i18n::empty_install_logs(language))
-                .size(14)
-                .color(muted_text_color(dark)),
+                .size(13)
+                .color(terminal_muted_color(dark)),
         );
     } else {
-        for log in &task.logs {
+        for log in visible_logs {
             logs = logs.push(
-                text(format!("› {log}"))
-                    .size(14)
-                    .color(detail_text_color(dark)),
+                text(terminal_log_line(log))
+                    .size(13)
+                    .color(terminal_log_color(log, dark)),
             );
         }
     }
@@ -973,8 +1442,122 @@ fn install_log_panel<'a>(
     container(logs)
         .padding(16)
         .width(Length::Fill)
-        .style(section_card)
+        .style(terminal_log_style)
         .into()
+}
+
+fn should_keep_install_log(log: &str) -> bool {
+    !is_open_operation_text(log) && !contains_cjk(log)
+}
+
+fn open_platform_name(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Ios => "iOS Simulator",
+        Platform::Android => "Android Emulator",
+    }
+}
+
+fn open_log_message(platform: Platform, state: &str) -> String {
+    let platform = open_platform_name(platform);
+    match state {
+        "opening" => format!("Opening {platform}"),
+        "opened" => format!("{platform} opened"),
+        _ => platform.to_string(),
+    }
+}
+
+fn is_open_operation_text(value: &str) -> bool {
+    let trimmed = value.trim();
+    matches!(
+        trimmed,
+        "Simulator opened" | "模拟器已打开" | "Opening..." | "打开中..."
+    ) || trimmed.starts_with("Opening iOS Simulator")
+        || trimmed.starts_with("Opening Android Emulator")
+        || trimmed.starts_with("iOS Simulator opened")
+        || trimmed.starts_with("Android Emulator opened")
+        || trimmed.starts_with("Failed to open iOS Simulator")
+        || trimmed.starts_with("Failed to open Android Emulator")
+        || trimmed.starts_with("正在打开")
+}
+
+fn contains_cjk(value: &str) -> bool {
+    value.chars().any(|ch| {
+        ('\u{4E00}'..='\u{9FFF}').contains(&ch)
+            || ('\u{3400}'..='\u{4DBF}').contains(&ch)
+            || ('\u{F900}'..='\u{FAFF}').contains(&ch)
+    })
+}
+
+fn terminal_log_line(log: &str) -> String {
+    if let Some(command) = log
+        .strip_prefix("执行命令：")
+        .or_else(|| log.strip_prefix("Running: "))
+    {
+        return format!("$ {}", compact_terminal_paths(command));
+    }
+
+    if let Some(output) = log
+        .strip_prefix("输出：")
+        .or_else(|| log.strip_prefix("stdout: "))
+    {
+        return format!("  {}", compact_terminal_paths(output));
+    }
+
+    if let Some(output) = log
+        .strip_prefix("错误输出：")
+        .or_else(|| log.strip_prefix("stderr: "))
+    {
+        return format!("! {}", compact_terminal_paths(output));
+    }
+
+    format!("# {}", compact_terminal_paths(log))
+}
+
+fn compact_terminal_paths(value: &str) -> String {
+    env::var("HOME")
+        .ok()
+        .filter(|home| !home.is_empty())
+        .map(|home| value.replace(&home, "~"))
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn terminal_log_color(log: &str, dark: bool) -> Color {
+    if log.starts_with("执行命令：") || log.starts_with("Running: ") {
+        return if dark {
+            Color::from_rgb8(0x8F, 0xC8, 0xFF)
+        } else {
+            Color::from_rgb8(0x0D, 0x57, 0xA1)
+        };
+    }
+
+    if log.starts_with("错误输出：")
+        || log.starts_with("stderr: ")
+        || log.starts_with("Failed to open ")
+    {
+        return if dark {
+            Color::from_rgb8(0xFF, 0xA3, 0x91)
+        } else {
+            Color::from_rgb8(0xB2, 0x47, 0x38)
+        };
+    }
+
+    if log.starts_with("输出：") || log.starts_with("stdout: ") {
+        return if dark {
+            Color::from_rgb8(0xC9, 0xD3, 0xDF)
+        } else {
+            Color::from_rgb8(0x38, 0x45, 0x55)
+        };
+    }
+
+    terminal_muted_color(dark)
+}
+
+fn terminal_muted_color(dark: bool) -> Color {
+    if dark {
+        Color::from_rgb8(0xA9, 0xB5, 0xC2)
+    } else {
+        Color::from_rgb8(0x5A, 0x67, 0x77)
+    }
 }
 
 fn install_stage_states(
@@ -985,6 +1568,7 @@ fn install_stage_states(
     match &task.state {
         InstallState::Running => sequential_active_states(active_install_stage(platform, task)),
         InstallState::Opening => sequential_active_states(3),
+        InstallState::Interrupted => sequential_active_states(active_install_stage(platform, task)),
         InstallState::Completed => [StepVisualState::Done; 4],
         InstallState::Failed(error) => {
             sequential_blocked_states(failed_install_stage(platform, error))
@@ -1192,6 +1776,45 @@ fn section_card(theme: &Theme) -> container::Style {
         )
 }
 
+fn cleanup_scrim_style(_theme: &Theme) -> container::Style {
+    container::Style::default().background(Color {
+        a: 0.46,
+        ..Color::BLACK
+    })
+}
+
+fn cleanup_dialog_card_style(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+
+    container::Style::default()
+        .background(palette.background.base.color)
+        .color(palette.background.base.text)
+        .border(
+            border::rounded(20)
+                .color(palette.background.strong.color)
+                .width(1.0),
+        )
+}
+
+fn terminal_log_style(theme: &Theme) -> container::Style {
+    let dark = theme.extended_palette().is_dark;
+    let background = if dark {
+        Color::from_rgb8(0x0B, 0x11, 0x1A)
+    } else {
+        Color::from_rgb8(0xFF, 0xFB, 0xF3)
+    };
+    let border_color = if dark {
+        Color::from_rgb8(0x2A, 0x34, 0x42)
+    } else {
+        Color::from_rgb8(0xDD, 0xD6, 0xCB)
+    };
+
+    container::Style::default()
+        .background(background)
+        .color(terminal_muted_color(dark))
+        .border(border::rounded(16).color(border_color).width(1.0))
+}
+
 fn main_scrollbar_style(
     theme: &Theme,
     status: iced::widget::scrollable::Status,
@@ -1369,6 +1992,30 @@ fn primary_button_style(
     }
 }
 
+fn link_button_style(
+    theme: &Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let dark = theme.extended_palette().is_dark;
+    let text_color = match (status, dark) {
+        (iced::widget::button::Status::Hovered, true) => Color::from_rgb8(0x77, 0xD7, 0xD9),
+        (iced::widget::button::Status::Pressed, true) => Color::from_rgb8(0x4C, 0xB9, 0xBC),
+        (iced::widget::button::Status::Disabled, true) => Color::from_rgb8(0x71, 0x7B, 0x86),
+        (_, true) => Color::from_rgb8(0x4E, 0xC6, 0xC9),
+        (iced::widget::button::Status::Hovered, false) => Color::from_rgb8(0x0A, 0x61, 0x66),
+        (iced::widget::button::Status::Pressed, false) => Color::from_rgb8(0x07, 0x4D, 0x52),
+        (iced::widget::button::Status::Disabled, false) => Color::from_rgb8(0x8A, 0x95, 0xA1),
+        (_, false) => Color::from_rgb8(0x0D, 0x74, 0x7A),
+    };
+
+    iced::widget::button::Style {
+        background: None,
+        text_color,
+        border: border::rounded(0),
+        ..Default::default()
+    }
+}
+
 fn secondary_button_style(
     theme: &Theme,
     status: iced::widget::button::Status,
@@ -1429,6 +2076,63 @@ fn load_doctor_task() -> Task<Message> {
     Task::perform(load_doctor_snapshot(), Message::DoctorLoaded)
 }
 
+async fn cleanup_selected_items(
+    platform: Platform,
+    items: Vec<CleanupItemKind>,
+) -> Result<CleanupOutcome, String> {
+    let paths = AppPaths::detect().map_err(|error| error.to_string())?;
+    let mut removed_paths = 0;
+
+    for item in items {
+        for path in cleanup_paths_for_item(platform, item, &paths) {
+            if remove_known_path(&path)
+                .map_err(|error| format!("failed to remove {}: {error}", path.to_string_lossy()))?
+            {
+                removed_paths += 1;
+            }
+        }
+    }
+
+    Ok(CleanupOutcome { removed_paths })
+}
+
+fn cleanup_paths_for_item(
+    platform: Platform,
+    item: CleanupItemKind,
+    paths: &AppPaths,
+) -> Vec<PathBuf> {
+    match item {
+        CleanupItemKind::DownloadCache => {
+            let mut paths_to_remove = vec![paths.cache_dir.clone()];
+            if platform == Platform::Android {
+                paths_to_remove.push(paths.android_sdk_root.join(".simdock-cache"));
+            }
+            paths_to_remove
+        }
+        CleanupItemKind::LogsAndSnapshot => vec![
+            paths.logs_dir.clone(),
+            paths.app_support_dir.join(OPERATION_SNAPSHOT_FILE),
+        ],
+        CleanupItemKind::ManagedJavaRuntime => vec![paths.app_support_dir.join("java-runtime")],
+        CleanupItemKind::AndroidVirtualDevices => vec![paths.android_avd_root.clone()],
+        CleanupItemKind::AndroidSdk => vec![paths.android_sdk_root.clone()],
+    }
+}
+
+fn remove_known_path(path: &Path) -> Result<bool, std::io::Error> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(false);
+    };
+
+    if metadata.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+
+    Ok(true)
+}
+
 async fn open_simulator(platform: Platform) -> Result<(), String> {
     match platform {
         Platform::Ios => open_ios_simulator().await,
@@ -1457,14 +2161,26 @@ async fn open_ios_simulator() -> Result<(), String> {
 async fn open_android_emulator() -> Result<(), String> {
     let paths = AppPaths::detect().map_err(|error| error.to_string())?;
     let emulator_path = paths.android_sdk_root.join("emulator/emulator");
+    let adb_path = paths.android_sdk_root.join("platform-tools/adb");
+    let adb_available = adb_path.exists();
+    let android_path_env = android_emulator_path_env(&paths.android_sdk_root)?;
     let emulator_program = if emulator_path.exists() {
         emulator_path
     } else {
         PathBuf::from("emulator")
     };
 
-    let list_output = tokio::process::Command::new(&emulator_program)
+    let mut list_command = tokio::process::Command::new(&emulator_program);
+    list_command
         .arg("-list-avds")
+        .env("ANDROID_SDK_ROOT", &paths.android_sdk_root)
+        .env("ANDROID_HOME", &paths.android_sdk_root)
+        .env("ANDROID_AVD_HOME", &paths.android_avd_root)
+        .env("PATH", &android_path_env);
+    if adb_available {
+        list_command.env("ADB", &adb_path);
+    }
+    let list_output = list_command
         .output()
         .await
         .map_err(|error| error.to_string())?;
@@ -1477,12 +2193,46 @@ async fn open_android_emulator() -> Result<(), String> {
         .map(str::to_string)
         .ok_or_else(|| "No Android virtual device was found to open".to_string())?;
 
-    tokio::process::Command::new(&emulator_program)
+    if adb_available {
+        let adb_output = tokio::process::Command::new(&adb_path)
+            .arg("start-server")
+            .env("ANDROID_SDK_ROOT", &paths.android_sdk_root)
+            .env("ANDROID_HOME", &paths.android_sdk_root)
+            .env("ANDROID_AVD_HOME", &paths.android_avd_root)
+            .env("PATH", &android_path_env)
+            .output()
+            .await
+            .map_err(|error| error.to_string())?;
+        command_result(&adb_output, "adb start-server")?;
+    }
+
+    let mut command = tokio::process::Command::new(&emulator_program);
+    command
         .args(["-avd", &avd_name])
-        .spawn()
-        .map_err(|error| error.to_string())?;
+        .env("ANDROID_SDK_ROOT", &paths.android_sdk_root)
+        .env("ANDROID_HOME", &paths.android_sdk_root)
+        .env("ANDROID_AVD_HOME", &paths.android_avd_root)
+        .env("PATH", &android_path_env);
+    if adb_available {
+        command.env("ADB", &adb_path);
+    }
+    command.spawn().map_err(|error| error.to_string())?;
 
     Ok(())
+}
+
+fn android_emulator_path_env(sdk_root: &Path) -> Result<OsString, String> {
+    let mut paths = vec![
+        sdk_root.join("platform-tools"),
+        sdk_root.join("emulator"),
+        sdk_root.join("cmdline-tools/latest/bin"),
+    ];
+
+    if let Some(current_path) = env::var_os("PATH") {
+        paths.extend(env::split_paths(&current_path));
+    }
+
+    env::join_paths(paths).map_err(|error| error.to_string())
 }
 
 fn command_result(output: &std::process::Output, command: &str) -> Result<(), String> {
@@ -1612,7 +2362,10 @@ fn run_install_stream(platform: Platform) -> impl iced::futures::Stream<Item = I
                 }
                 Platform::Android => {
                     let paths = AppPaths::detect().map_err(|error| error.to_string())?;
-                    let provider = AndroidProvider::new(paths.android_sdk_root);
+                    let provider = AndroidProvider::with_avd_root(
+                        paths.android_sdk_root,
+                        paths.android_avd_root,
+                    );
                     provider
                         .install_runtime(default_install_request(platform), Some(sender))
                         .await
@@ -1661,7 +2414,8 @@ fn report_for_platform(snapshot: &DoctorSnapshot, platform: Platform) -> Option<
 async fn load_doctor_snapshot() -> Result<DoctorSnapshot, String> {
     let paths = AppPaths::detect().map_err(|error| error.to_string())?;
     let ios = IosProvider::new();
-    let android = AndroidProvider::new(paths.android_sdk_root.clone());
+    let android =
+        AndroidProvider::with_avd_root(paths.android_sdk_root.clone(), paths.android_avd_root);
     let service = SimdockService::new(ios, android);
     let reports = service
         .doctor_all()

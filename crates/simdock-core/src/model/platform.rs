@@ -4,14 +4,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-/// Simdock 当前支持的平台。
+/// Simdock当前支持的平台。
 pub enum Platform {
     Ios,
     Android,
 }
 
 impl Platform {
-    /// 返回用于 CLI、JSON 和日志输出的稳定平台标识。
+    /// 返回用于CLI、JSON和日志输出的稳定平台标识。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Ios => "ios",

@@ -60,7 +60,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = AppPaths::detect()?;
     let ios = IosProvider::new();
-    let android = AndroidProvider::new(paths.android_sdk_root.clone());
+    let android = AndroidProvider::with_avd_root(
+        paths.android_sdk_root.clone(),
+        paths.android_avd_root.clone(),
+    );
     let service = SimdockService::new(ios.clone(), android.clone());
 
     match cli.command {

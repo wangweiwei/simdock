@@ -12,9 +12,9 @@ pub enum TaskState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-/// Provider 向上层报告安装或启动进度的事件。
+/// Provider向上层报告安装或启动进度的事件。
 ///
-/// GUI 使用这些事件更新进度条和实时日志，CLI 后续也可以用它做流式输出。
+/// GUI使用这些事件更新进度条和实时日志，CLI后续也可以用它做流式输出。
 pub enum TaskEvent {
     Started {
         id: String,

@@ -21,22 +21,22 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Default)]
-/// iOS Simulator 平台 Provider。
+/// iOS Simulator平台Provider。
 ///
-/// 该 Provider 只面向 macOS，通过 Apple 官方工具链（Xcode、xcodebuild、
+/// 该Provider只面向macOS，通过Apple官方工具链（Xcode、xcodebuild、
 /// xcrun、simctl）完成诊断、运行时检测、模拟器创建和启动。
 pub struct IosProvider;
 
 impl IosProvider {
-    /// 创建 iOS Provider。
+    /// 创建iOS Provider。
     pub fn new() -> Self {
         Self
     }
 
-    /// 在 `/Applications` 下查找 Xcode.app。
+    /// 在`/Applications`下查找Xcode.app。
     ///
-    /// 优先选择标准名称 `Xcode.app`，如果用户安装了 `Xcode-beta.app`
-    /// 这类变体，则退而选择第一个以 Xcode 开头的应用。
+    /// 优先选择标准名称`Xcode.app`，如果用户安装了`Xcode-beta.app`
+    /// 这类变体，则退而选择第一个以Xcode开头的应用。
     fn discover_xcode_app(&self) -> Option<PathBuf> {
         let applications_dir = Path::new("/Applications");
         let entries = fs::read_dir(applications_dir).ok()?;
@@ -71,19 +71,19 @@ impl IosProvider {
             })
     }
 
-    /// 返回 Xcode 的 Developer 目录。
+    /// 返回Xcode的Developer目录。
     ///
-    /// 后续调用 `xcodebuild`、`xcrun` 时会显式设置 `DEVELOPER_DIR`，
-    /// 避免受到全局 `xcode-select` 配置漂移的影响。
+    /// 后续调用`xcodebuild`、`xcrun`时会显式设置`DEVELOPER_DIR`，
+    /// 避免受到全局`xcode-select`配置漂移的影响。
     fn developer_dir(&self) -> Option<PathBuf> {
         self.discover_xcode_app()
             .map(|path| path.join("Contents/Developer"))
             .filter(|path| path.exists())
     }
 
-    /// 获取必须存在的 iOS 工具链。
+    /// 获取必须存在的iOS工具链。
     ///
-    /// 安装和列举运行时属于真实操作，缺少 Xcode 时直接返回可读错误。
+    /// 安装和列举运行时属于真实操作，缺少Xcode时直接返回可读错误。
     fn require_toolchain(&self) -> Result<IosToolchain> {
         let developer_dir = self.developer_dir().ok_or_else(|| {
             anyhow!("No Xcode.app installation found in /Applications. Install Xcode first.")
@@ -677,7 +677,7 @@ fn emit_finished(sender: Option<&TaskSender>, id: &str) {
 
 /// 统一处理安装失败。
 ///
-/// 这样 Provider 能保证返回错误的同时，也向 GUI / CLI 发出失败事件。
+/// 这样Provider能保证返回错误的同时，也向GUI/CLI发出失败事件。
 fn fail_install<T>(sender: Option<&TaskSender>, id: &str, error: impl Into<String>) -> Result<T> {
     let error = error.into();
     if let Some(sender) = sender {
@@ -690,7 +690,7 @@ fn fail_install<T>(sender: Option<&TaskSender>, id: &str, error: impl Into<Strin
     bail!(error)
 }
 
-/// 通过 `simctl list runtimes --json` 获取 iOS 运行时。
+/// 通过`simctl list runtimes --json`获取iOS运行时。
 async fn list_ios_runtimes(developer_dir: &Path) -> Result<Vec<IosRuntimeInfo>> {
     let probe = run_command(
         "xcrun",
@@ -706,7 +706,7 @@ async fn list_ios_runtimes(developer_dir: &Path) -> Result<Vec<IosRuntimeInfo>> 
     parse_ios_runtimes(&probe.stdout)
 }
 
-/// 通过 `simctl list devicetypes --json` 获取可创建设备类型。
+/// 通过`simctl list devicetypes --json`获取可创建设备类型。
 async fn list_ios_device_types(developer_dir: &Path) -> Result<Vec<IosDeviceTypeInfo>> {
     let probe = run_command(
         "xcrun",
@@ -722,7 +722,7 @@ async fn list_ios_device_types(developer_dir: &Path) -> Result<Vec<IosDeviceType
     parse_ios_device_types(&probe.stdout)
 }
 
-/// 通过 `simctl list devices --json` 获取已存在的模拟器设备。
+/// 通过`simctl list devices --json`获取已存在的模拟器设备。
 async fn list_ios_devices(developer_dir: &Path) -> Result<Vec<(String, IosDeviceInfo)>> {
     let probe = run_command(
         "xcrun",
@@ -738,7 +738,7 @@ async fn list_ios_devices(developer_dir: &Path) -> Result<Vec<(String, IosDevice
     parse_ios_devices(&probe.stdout)
 }
 
-/// 解析 simctl runtime JSON。
+/// 解析simctl runtime JSON。
 fn parse_ios_runtimes(json: &str) -> Result<Vec<IosRuntimeInfo>> {
     let value: serde_json::Value =
         serde_json::from_str(json).context("failed to parse simctl runtimes JSON")?;
@@ -790,7 +790,7 @@ fn parse_ios_runtimes(json: &str) -> Result<Vec<IosRuntimeInfo>> {
         .collect())
 }
 
-/// 解析 simctl devicetype JSON。
+/// 解析simctl devicetype JSON。
 fn parse_ios_device_types(json: &str) -> Result<Vec<IosDeviceTypeInfo>> {
     let value: serde_json::Value =
         serde_json::from_str(json).context("failed to parse simctl device types JSON")?;
@@ -818,7 +818,7 @@ fn parse_ios_device_types(json: &str) -> Result<Vec<IosDeviceTypeInfo>> {
         .collect())
 }
 
-/// 解析 simctl device JSON。
+/// 解析simctl device JSON。
 fn parse_ios_devices(json: &str) -> Result<Vec<(String, IosDeviceInfo)>> {
     let value: serde_json::Value =
         serde_json::from_str(json).context("failed to parse simctl devices JSON")?;
@@ -866,10 +866,10 @@ fn parse_ios_devices(json: &str) -> Result<Vec<(String, IosDeviceInfo)>> {
     Ok(result)
 }
 
-/// 选择目标 iOS 运行时。
+/// 选择目标iOS运行时。
 ///
 /// 优先匹配用户请求的版本；如果没有精确命中，则选择已安装且版本最高的
-/// 可用 iOS runtime，保证“一键安装”尽量能继续走到可启动状态。
+/// 可用iOS runtime，保证“一键安装”尽量能继续走到可启动状态。
 fn select_runtime(runtimes: &[IosRuntimeInfo], requested_version: &str) -> Option<IosRuntimeInfo> {
     let requested = requested_version.trim();
     let requested_identifier_suffix = requested.replace('.', "-");
@@ -896,7 +896,7 @@ fn select_runtime(runtimes: &[IosRuntimeInfo], requested_version: &str) -> Optio
 
 /// 选择目标设备类型。
 ///
-/// 如果用户指定设备名则优先模糊匹配；否则默认选择较新的 iPhone 类型。
+/// 如果用户指定设备名则优先模糊匹配；否则默认选择较新的iPhone类型。
 fn select_device_type(
     device_types: &[IosDeviceTypeInfo],
     requested_name: Option<&str>,
@@ -934,7 +934,7 @@ fn select_device_type(
         .or_else(|| device_types.first().cloned())
 }
 
-/// 查找或创建目标 iOS 模拟器。
+/// 查找或创建目标iOS模拟器。
 ///
 /// 复用已有设备可以避免重复创建大量模拟器；只有找不到同名同运行时时才创建。
 async fn find_or_create_ios_device(
@@ -984,7 +984,7 @@ async fn find_or_create_ios_device(
     })
 }
 
-/// 启动指定 UDID 的 iOS 模拟器。
+/// 启动指定UDID的iOS模拟器。
 async fn boot_ios_device(
     developer_dir: &Path,
     udid: &str,
@@ -1020,7 +1020,7 @@ async fn boot_ios_device(
     Ok(())
 }
 
-/// 打开 Simulator.app 并尽量聚焦到目标设备。
+/// 打开Simulator.app并尽量聚焦到目标设备。
 async fn open_simulator_app(
     developer_dir: &Path,
     udid: &str,
@@ -1046,7 +1046,7 @@ async fn open_simulator_app(
     }
 }
 
-/// 将版本号转换成可排序的数字 key。
+/// 将版本号转换成可排序的数字key。
 fn version_key(version: &str) -> Vec<u32> {
     version
         .split(|ch: char| !ch.is_ascii_digit())
@@ -1055,7 +1055,7 @@ fn version_key(version: &str) -> Vec<u32> {
         .collect()
 }
 
-/// 运行 PATH 中的命令并收集输出。
+/// 运行PATH中的命令并收集输出。
 async fn run_command(program: &str, args: &[&str], envs: &[(&str, &Path)]) -> CommandProbe {
     let mut command = Command::new(program);
     command.args(args);
@@ -1079,7 +1079,7 @@ async fn run_path_command(program: &Path, args: &[&str], envs: &[(&str, &Path)])
     finish_probe(command).await
 }
 
-/// 运行 PATH 中的命令，并把 stdout / stderr 按行转成任务日志。
+/// 运行PATH中的命令，并把stdout/stderr按行转成任务日志。
 async fn run_command_streamed(
     program: &str,
     args: &[&str],
@@ -1097,7 +1097,7 @@ async fn run_command_streamed(
     finish_probe_streamed(command, program, args, task_id, sender).await
 }
 
-/// 运行指定路径的命令，并把 stdout / stderr 按行转成任务日志。
+/// 运行指定路径的命令，并把stdout/stderr按行转成任务日志。
 async fn run_path_command_streamed(
     program: &Path,
     args: &[&str],

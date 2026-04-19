@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 
 #[derive(Debug, Clone)]
-/// Simdock 在本机使用的目录集合。
+/// Simdock在本机使用的目录集合。
 ///
-/// 所有托管下载、日志和 Android SDK / AVD 数据都应该通过这里解析，
+/// 所有托管下载、日志和Android SDK/AVD数据都应该通过这里解析，
 /// 避免各层散落硬编码路径。
 pub struct AppPaths {
     pub app_support_dir: PathBuf,
@@ -17,7 +17,7 @@ pub struct AppPaths {
 }
 
 impl AppPaths {
-    /// 根据 macOS 应用目录规范探测 Simdock 的本地目录。
+    /// 根据macOS应用目录规范探测Simdock的本地目录。
     pub fn detect() -> Result<Self> {
         let project_dirs = ProjectDirs::from("com", "simdock", "Simdock")
             .context("unable to determine application directories")?;

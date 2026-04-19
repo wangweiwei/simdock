@@ -50,6 +50,12 @@ Build optimized release binaries and inspect size:
 ./scripts/size-report.sh
 ```
 
+Build a macOS `.app` bundle and `.dmg` with Simdock icons:
+
+```bash
+./scripts/package-macos.sh
+```
+
 ## Project Layout
 
 ```text
@@ -68,6 +74,7 @@ scripts/
   run-cli.sh          CLI development runner.
   run-desktop.sh      Desktop development runner.
   build-release.sh    Release build helper.
+  package-macos.sh    macOS app bundle and DMG packaging helper.
   size-report.sh      Release binary size helper.
 ```
 
@@ -82,7 +89,7 @@ scripts/
 
 ## Status
 
-Simdock is still early-stage software. The current focus is improving iOS / Android environment checks, the iOS simulator setup and launch workflow, the desktop experience, and the future managed Android SDK / AVD installation flow.
+Simdock is still early-stage software. The current focus is improving iOS/Android environment checks, managed iOS simulator setup, managed Android SDK/AVD setup, emulator launch workflows, and the desktop experience.
 
 ## License
 

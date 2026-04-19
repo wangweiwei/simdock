@@ -22,14 +22,14 @@ pub struct TokioShellRunner;
 #[async_trait]
 /// 命令执行抽象。
 ///
-/// 通过 trait 隔离真实 shell，后续测试可以替换为 fake runner。
+/// 通过trait隔离真实shell，后续测试可以替换为fake runner。
 pub trait ShellRunner {
-    /// 执行命令并返回 stdout / stderr。
+    /// 执行命令并返回stdout/stderr。
     async fn run(&self, spec: &CommandSpec) -> Result<CommandOutput>;
 }
 
 impl TokioShellRunner {
-    /// 创建基于 Tokio 的命令执行器。
+    /// 创建基于Tokio的命令执行器。
     pub fn new() -> Self {
         Self
     }

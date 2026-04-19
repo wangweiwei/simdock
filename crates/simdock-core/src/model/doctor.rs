@@ -5,7 +5,7 @@ use crate::model::Platform;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// 单个环境检查项。
 ///
-/// `key` 是机器可读的稳定标识，`detail` 是给用户或日志展示的说明。
+/// `key`是机器可读的稳定标识，`detail`是给用户或日志展示的说明。
 pub struct DoctorCheck {
     pub key: String,
     pub ready: bool,
@@ -36,7 +36,7 @@ impl DoctorReport {
 
     /// 生成一个占位的未就绪报告。
     ///
-    /// 用于诊断尚未执行、平台仍在初始化，或需要给 UI 一个可展示状态时。
+    /// 用于诊断尚未执行、平台仍在初始化，或需要给UI一个可展示状态时。
     pub fn pending(platform: Platform, detail: impl Into<String>) -> Self {
         Self::from_checks(
             platform,

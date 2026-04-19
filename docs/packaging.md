@@ -11,6 +11,23 @@ Simdock currently produces two binaries:
 ./scripts/build-release.sh
 ```
 
+## macOS App and DMG
+
+```bash
+./scripts/package-macos.sh
+```
+
+The macOS packaging script:
+
+- Builds `simdock-desktop` in release mode.
+- Creates `target/macos/Simdock.app`.
+- Writes `Info.plist` with `CFBundleIconFile=Simdock`.
+- Copies `assets/brand/simdock.icns` into `Contents/Resources`.
+- Creates `target/macos/Simdock-<version>.dmg`.
+- Adds `.VolumeIcon.icns` so the mounted DMG volume uses the Simdock icon.
+- Adds a Finder custom icon to the generated `.dmg` file when macOS icon tools are available.
+- Adds an `/Applications` symlink for drag-and-drop installation.
+
 ## Size Report
 
 ```bash
