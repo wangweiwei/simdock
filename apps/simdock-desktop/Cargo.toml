@@ -1,0 +1,15 @@
+[package]
+name = "simdock-desktop"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+iced.workspace = true
+iced_graphics = "0.13"
+tokio.workspace = true
+simdock-core = { path = "../../crates/simdock-core" }
+simdock-infra = { path = "../../crates/simdock-infra" }
