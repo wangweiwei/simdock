@@ -9,5 +9,5 @@ pub mod service;
 
 pub use model::{
     CreateProfileRequest, DeviceTemplate, DoctorCheck, DoctorReport, InstallRequest, Instance,
-    InstanceState, Platform, Profile, Runtime, TaskEvent, TaskState,
+    InstanceState, Platform, Profile, Runtime, SimulatorDevice, TaskEvent, TaskState,
 };

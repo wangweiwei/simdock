@@ -23,7 +23,7 @@ use iced::{
 };
 use serde::{Deserialize, Serialize};
 use simdock_core::{
-    DoctorReport, InstallRequest, Platform, TaskEvent,
+    DoctorReport, InstallRequest, Platform, SimulatorDevice, TaskEvent,
     provider::{PlatformProvider, android::AndroidProvider, ios::IosProvider},
     service::SimdockService,
 };
@@ -179,13 +179,15 @@ struct CleanupDialog {
 #[derive(Debug, Clone)]
 struct CleanupItemView {
     kind: CleanupItemKind,
+    label: String,
     checked: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CleanupItemKind {
     DownloadCache,
     LogsAndSnapshot,
+    IosSimulatorDevice { udid: String },
     ManagedJavaRuntime,
     AndroidVirtualDevices,
     AndroidSdk,
@@ -207,6 +209,7 @@ enum Message {
     OpenSimulatorRequested(Platform),
     OpenSimulatorFinished(Platform, Result<(), String>),
     ManageInstalledContentRequested(Platform),
+    CleanupDialogPrepared(Result<CleanupDialog, String>),
     CleanupItemToggled(CleanupItemKind, bool),
     CleanupCancelled,
     CleanupConfirmed,
@@ -333,32 +336,17 @@ impl InstallTasks {
 }
 
 impl CleanupDialog {
-    fn new(platform: Platform) -> Self {
+    fn new(platform: Platform, language: AppLanguage) -> Self {
         let mut items = vec![
-            CleanupItemView {
-                kind: CleanupItemKind::DownloadCache,
-                checked: true,
-            },
-            CleanupItemView {
-                kind: CleanupItemKind::LogsAndSnapshot,
-                checked: true,
-            },
+            cleanup_item_view(CleanupItemKind::DownloadCache, language, true),
+            cleanup_item_view(CleanupItemKind::LogsAndSnapshot, language, true),
         ];
 
         if platform == Platform::Android {
             items.extend([
-                CleanupItemView {
-                    kind: CleanupItemKind::ManagedJavaRuntime,
-                    checked: false,
-                },
-                CleanupItemView {
-                    kind: CleanupItemKind::AndroidVirtualDevices,
-                    checked: false,
-                },
-                CleanupItemView {
-                    kind: CleanupItemKind::AndroidSdk,
-                    checked: false,
-                },
+                cleanup_item_view(CleanupItemKind::ManagedJavaRuntime, language, false),
+                cleanup_item_view(CleanupItemKind::AndroidVirtualDevices, language, false),
+                cleanup_item_view(CleanupItemKind::AndroidSdk, language, false),
             ]);
         }
 
@@ -370,16 +358,39 @@ impl CleanupDialog {
         }
     }
 
+    fn add_ios_simulator_devices(&mut self, devices: Vec<SimulatorDevice>) {
+        self.items.extend(devices.into_iter().map(|device| {
+            let label = device.display_label();
+            CleanupItemView {
+                kind: CleanupItemKind::IosSimulatorDevice { udid: device.id },
+                label,
+                checked: false,
+            }
+        }));
+    }
+
     fn selected_items(&self) -> Vec<CleanupItemKind> {
         self.items
             .iter()
             .filter(|item| item.checked)
-            .map(|item| item.kind)
+            .map(|item| item.kind.clone())
             .collect()
     }
 
     fn has_selected_items(&self) -> bool {
         self.items.iter().any(|item| item.checked)
+    }
+}
+
+fn cleanup_item_view(
+    kind: CleanupItemKind,
+    language: AppLanguage,
+    checked: bool,
+) -> CleanupItemView {
+    CleanupItemView {
+        label: i18n::cleanup_item_label(&kind, language).to_string(),
+        kind,
+        checked,
     }
 }
 
@@ -776,7 +787,22 @@ fn update(app: &mut DoctorApp, message: Message) -> Task<Message> {
         }
         Message::ManageInstalledContentRequested(platform) => {
             if !app.install_task(platform).is_busy() {
-                app.cleanup_dialog = Some(CleanupDialog::new(platform));
+                app.cleanup_dialog = None;
+                let language = app.language;
+                return Task::perform(prepare_cleanup_dialog(platform, language), |result| {
+                    Message::CleanupDialogPrepared(result)
+                });
+            }
+            Task::none()
+        }
+        Message::CleanupDialogPrepared(result) => {
+            match result {
+                Ok(dialog) => app.cleanup_dialog = Some(dialog),
+                Err(error) => {
+                    let mut dialog = CleanupDialog::new(app.active_tab, app.language);
+                    dialog.error = Some(i18n::cleanup_failed_message(&error, app.language));
+                    app.cleanup_dialog = Some(dialog);
+                }
             }
             Task::none()
         }
@@ -1202,17 +1228,32 @@ fn cleanup_dialog_overlay<'a>(
 ) -> Element<'a, Message> {
     let mut checklist = column![].spacing(12);
     for item in &dialog.items {
-        let kind = item.kind;
-        let mut row = checkbox(i18n::cleanup_item_label(kind, language), item.checked)
+        let kind = item.kind.clone();
+        let mut row = checkbox(item.label.clone(), item.checked)
             .text_size(14)
             .size(18);
 
         if !dialog.running {
-            row = row.on_toggle(move |checked| Message::CleanupItemToggled(kind, checked));
+            row = row.on_toggle(move |checked| Message::CleanupItemToggled(kind.clone(), checked));
         }
 
         checklist = checklist.push(row);
     }
+    let checklist_height = if dialog.items.len() > 8 {
+        Length::Fixed(260.0)
+    } else {
+        Length::Shrink
+    };
+    let checklist = container(
+        scrollable(checklist.width(Length::Fill))
+            .height(checklist_height)
+            .direction(Direction::Vertical(
+                Scrollbar::new().width(18).scroller_width(8).margin(0),
+            ))
+            .style(main_scrollbar_style),
+    )
+    .width(Length::Fill)
+    .height(checklist_height);
 
     let mut confirm_button = button(text(i18n::cleanup_confirm_button_label(language)).size(14))
         .padding([10, 16])
@@ -1262,7 +1303,7 @@ fn cleanup_dialog_overlay<'a>(
         container(
             container(content)
                 .padding(24)
-                .width(520)
+                .width(640)
                 .style(cleanup_dialog_card_style),
         )
         .width(Length::Fill)
@@ -2137,6 +2178,23 @@ fn load_doctor_task() -> Task<Message> {
     Task::perform(load_doctor_snapshot(), Message::DoctorLoaded)
 }
 
+async fn prepare_cleanup_dialog(
+    platform: Platform,
+    language: AppLanguage,
+) -> Result<CleanupDialog, String> {
+    let mut dialog = CleanupDialog::new(platform, language);
+
+    if platform == Platform::Ios {
+        let devices = IosProvider::new()
+            .list_simulator_devices()
+            .await
+            .map_err(|error| error.to_string())?;
+        dialog.add_ios_simulator_devices(devices);
+    }
+
+    Ok(dialog)
+}
+
 async fn cleanup_selected_items(
     platform: Platform,
     items: Vec<CleanupItemKind>,
@@ -2145,11 +2203,22 @@ async fn cleanup_selected_items(
     let mut removed_paths = 0;
 
     for item in items {
-        for path in cleanup_paths_for_item(platform, item, &paths) {
-            if remove_known_path(&path)
-                .map_err(|error| format!("failed to remove {}: {error}", path.to_string_lossy()))?
-            {
+        match &item {
+            CleanupItemKind::IosSimulatorDevice { udid } => {
+                IosProvider::new()
+                    .delete_simulator_device(udid)
+                    .await
+                    .map_err(|error| error.to_string())?;
                 removed_paths += 1;
+            }
+            _ => {
+                for path in cleanup_paths_for_item(platform, &item, &paths) {
+                    if remove_known_path(&path).map_err(|error| {
+                        format!("failed to remove {}: {error}", path.to_string_lossy())
+                    })? {
+                        removed_paths += 1;
+                    }
+                }
             }
         }
     }
@@ -2159,7 +2228,7 @@ async fn cleanup_selected_items(
 
 fn cleanup_paths_for_item(
     platform: Platform,
-    item: CleanupItemKind,
+    item: &CleanupItemKind,
     paths: &AppPaths,
 ) -> Vec<PathBuf> {
     match item {
@@ -2174,6 +2243,7 @@ fn cleanup_paths_for_item(
             paths.logs_dir.clone(),
             paths.app_support_dir.join(OPERATION_SNAPSHOT_FILE),
         ],
+        CleanupItemKind::IosSimulatorDevice { .. } => Vec::new(),
         CleanupItemKind::ManagedJavaRuntime => vec![paths.app_support_dir.join("java-runtime")],
         CleanupItemKind::AndroidVirtualDevices => vec![paths.android_avd_root.clone()],
         CleanupItemKind::AndroidSdk => vec![paths.android_sdk_root.clone()],

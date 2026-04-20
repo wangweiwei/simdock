@@ -312,13 +312,13 @@ pub(crate) fn cleanup_dialog_title(platform: Platform, language: AppLanguage) ->
 pub(crate) fn cleanup_dialog_detail(platform: Platform, language: AppLanguage) -> &'static str {
     match (platform, language) {
         (Platform::Ios, AppLanguage::English) => {
-            "Choose Simdock-managed iOS cache and recovery data to remove. Xcode and Apple-managed runtimes are not deleted."
+            "Choose Simdock cache, recovery data, and installed iOS simulator devices to remove. Xcode and Apple-managed runtimes are not deleted."
         }
         (Platform::Android, AppLanguage::English) => {
             "Choose Simdock-managed Android files to remove. SDK, AVD, and Java runtime choices may require reinstalling later."
         }
         (Platform::Ios, AppLanguage::Chinese) => {
-            "选择要移除的Simdock托管iOS缓存和恢复数据。不会删除Xcode或Apple管理的运行时。"
+            "选择要移除的Simdock缓存、恢复数据和已安装iOS模拟器设备。不会删除Xcode或Apple管理的运行时。"
         }
         (Platform::Android, AppLanguage::Chinese) => {
             "选择要移除的Simdock托管Android文件。SDK、AVD和Java运行时清理后可能需要重新安装。"
@@ -327,7 +327,7 @@ pub(crate) fn cleanup_dialog_detail(platform: Platform, language: AppLanguage) -
 }
 
 pub(crate) fn cleanup_item_label(
-    kind: crate::CleanupItemKind,
+    kind: &crate::CleanupItemKind,
     language: AppLanguage,
 ) -> &'static str {
     match (kind, language) {
@@ -337,6 +337,12 @@ pub(crate) fn cleanup_item_label(
             "Install logs and recovery snapshot"
         }
         (crate::CleanupItemKind::LogsAndSnapshot, AppLanguage::Chinese) => "安装日志和恢复快照",
+        (crate::CleanupItemKind::IosSimulatorDevice { .. }, AppLanguage::English) => {
+            "iOS simulator device"
+        }
+        (crate::CleanupItemKind::IosSimulatorDevice { .. }, AppLanguage::Chinese) => {
+            "iOS模拟器设备"
+        }
         (crate::CleanupItemKind::ManagedJavaRuntime, AppLanguage::English) => {
             "Managed Java runtime"
         }

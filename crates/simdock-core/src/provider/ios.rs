@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
@@ -15,7 +16,7 @@ use tokio::{
 use crate::{
     model::{
         CreateProfileRequest, DeviceTemplate, DoctorCheck, DoctorReport, InstallRequest, Instance,
-        Platform, Profile, Runtime,
+        Platform, Profile, Runtime, SimulatorDevice,
     },
     provider::{PlatformProvider, TaskSender},
 };
@@ -101,6 +102,26 @@ impl IosProvider {
             developer_dir,
             xcodebuild_path,
         })
+    }
+
+    /// 列出当前Xcode可见的全部iOS模拟器设备。
+    ///
+    /// 这里不区分设备来源，Xcode或Simdock创建的设备都会返回。
+    pub async fn list_simulator_devices(&self) -> Result<Vec<SimulatorDevice>> {
+        let toolchain = self.require_toolchain()?;
+        let runtimes = list_ios_runtimes(&toolchain.developer_dir).await?;
+        let devices = list_ios_devices(&toolchain.developer_dir).await?;
+        Ok(build_ios_simulator_devices(&runtimes, devices))
+    }
+
+    /// 删除指定UDID的iOS模拟器设备。
+    ///
+    /// 删除前会尽量先关闭设备；如果设备已经关闭或不存在，最终删除命令
+    /// 会给出明确错误。
+    pub async fn delete_simulator_device(&self, udid: &str) -> Result<()> {
+        let toolchain = self.require_toolchain()?;
+        shutdown_ios_device(&toolchain.developer_dir, udid).await;
+        delete_ios_device(&toolchain.developer_dir, udid).await
     }
 }
 
@@ -866,6 +887,67 @@ fn parse_ios_devices(json: &str) -> Result<Vec<(String, IosDeviceInfo)>> {
     Ok(result)
 }
 
+/// 合并runtime和device信息，生成UI可直接展示的iOS设备列表。
+fn build_ios_simulator_devices(
+    runtimes: &[IosRuntimeInfo],
+    devices: Vec<(String, IosDeviceInfo)>,
+) -> Vec<SimulatorDevice> {
+    let runtime_map = runtimes
+        .iter()
+        .map(|runtime| (runtime.identifier.as_str(), runtime))
+        .collect::<HashMap<_, _>>();
+
+    let mut result = devices
+        .into_iter()
+        .filter_map(|(runtime_id, device)| {
+            let runtime = runtime_map.get(runtime_id.as_str()).copied();
+            let is_ios_runtime = runtime.is_some()
+                || runtime_id.contains("SimRuntime.iOS")
+                || runtime_id.contains("iOS");
+            if !is_ios_runtime {
+                return None;
+            }
+
+            let runtime_version = runtime
+                .map(|runtime| runtime.version.clone())
+                .unwrap_or_else(|| ios_runtime_version_from_identifier(&runtime_id));
+            let runtime_name = runtime
+                .map(|runtime| runtime.name.clone())
+                .unwrap_or_else(|| format!("iOS {runtime_version}"));
+
+            Some(SimulatorDevice {
+                id: device.udid,
+                platform: Platform::Ios,
+                name: device.name,
+                runtime_id,
+                runtime_name,
+                runtime_version,
+                state: device.state,
+                available: device.available,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    result.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| {
+                version_key(&left.runtime_version).cmp(&version_key(&right.runtime_version))
+            })
+            .then_with(|| left.state.cmp(&right.state))
+    });
+    result
+}
+
+/// 从runtime identifier中推断版本号，作为runtime列表缺失时的兜底。
+fn ios_runtime_version_from_identifier(identifier: &str) -> String {
+    identifier
+        .rsplit_once("iOS-")
+        .map(|(_, suffix)| suffix.replace('-', "."))
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// 选择目标iOS运行时。
 ///
 /// 优先匹配用户请求的版本；如果没有精确命中，则选择已安装且版本最高的
@@ -1018,6 +1100,23 @@ async fn boot_ios_device(
 
     emit_log(sender, task_id, format!("Simulator booted: {udid}"));
     Ok(())
+}
+
+/// 尽量关闭指定UDID的iOS模拟器设备。
+async fn shutdown_ios_device(developer_dir: &Path, udid: &str) {
+    let args = ["simctl", "shutdown", udid];
+    let _ = run_command("xcrun", &args, &[("DEVELOPER_DIR", developer_dir)]).await;
+}
+
+/// 删除指定UDID的iOS模拟器设备。
+async fn delete_ios_device(developer_dir: &Path, udid: &str) -> Result<()> {
+    let args = ["simctl", "delete", udid];
+    let probe = run_command("xcrun", &args, &[("DEVELOPER_DIR", developer_dir)]).await;
+    if probe.success {
+        Ok(())
+    } else {
+        bail!("simctl delete failed for {udid}: {}", probe.summary())
+    }
 }
 
 /// 打开Simulator.app并尽量聚焦到目标设备。
