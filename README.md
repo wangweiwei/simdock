@@ -2,7 +2,16 @@
   <img src="assets/brand/png/simdock-app-icon-256.png" alt="Simdock logo" width="112" height="112">
 </p>
 
-# Simdock
+<h1 align="center">Simdock</h1>
+
+<p align="center">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.1.0-0D747A?style=flat-square">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-111820?style=flat-square">
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-2024-CB5A44?style=flat-square">
+  <img alt="GUI" src="https://img.shields.io/badge/GUI-iced-2B87FF?style=flat-square">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-6F7B86?style=flat-square">
+  <a href="README.zh-CN.md"><img alt="Language" src="https://img.shields.io/badge/language-English-0D747A?style=flat-square"></a>
+</p>
 
 [中文](README.zh-CN.md)
 
