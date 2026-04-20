@@ -1,5 +1,7 @@
 use std::{
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     path::{Path, PathBuf},
     process::Stdio,
 };
@@ -24,6 +26,8 @@ const ANDROID_CMDLINE_TOOLS_URL: &str =
 const ANDROID_CMDLINE_TOOLS_ARCHIVE: &str = "commandlinetools-mac-14742923_latest.zip";
 const MANAGED_JAVA_FEATURE_VERSION: u16 = 21;
 const SDKMANAGER_LICENSE_INPUT_REPEATS: usize = 200;
+
+type ToolEnv = (&'static str, OsString);
 
 #[derive(Debug, Clone)]
 /// Android Emulator平台Provider。
@@ -745,22 +749,31 @@ fn parse_java_major_version(version: &str) -> Option<u16> {
 }
 
 /// Android SDK工具运行时需要的一组环境变量。
-fn android_tool_envs<'a>(
-    sdk_root: &'a Path,
-    avd_root: &'a Path,
-    java_runtime: &'a JavaRuntime,
-) -> Vec<(&'static str, &'a Path)> {
+fn android_tool_envs(sdk_root: &Path, avd_root: &Path, java_runtime: &JavaRuntime) -> Vec<ToolEnv> {
     let mut envs = vec![
-        ("ANDROID_SDK_ROOT", sdk_root),
-        ("ANDROID_HOME", sdk_root),
-        ("ANDROID_AVD_HOME", avd_root),
+        ("ANDROID_SDK_ROOT", sdk_root.as_os_str().to_os_string()),
+        ("ANDROID_HOME", sdk_root.as_os_str().to_os_string()),
+        ("ANDROID_AVD_HOME", avd_root.as_os_str().to_os_string()),
     ];
 
     if let Some(java_home) = java_runtime.managed_home() {
-        envs.push(("JAVA_HOME", java_home));
+        let java_binary = JavaRuntime::managed_java_binary(java_home);
+        envs.push(("JAVA_HOME", java_home.as_os_str().to_os_string()));
+        envs.push(("JAVACMD", java_binary.as_os_str().to_os_string()));
+        envs.push(("PATH", prepend_to_path_env(&java_home.join("bin"))));
     }
 
     envs
+}
+
+/// 把托管JRE的`bin`放到PATH最前面，兜底兼容只查找`java`的SDK脚本。
+fn prepend_to_path_env(path: &Path) -> OsString {
+    let mut paths = vec![path.to_path_buf()];
+    if let Some(current_path) = env::var_os("PATH") {
+        paths.extend(env::split_paths(&current_path));
+    }
+
+    env::join_paths(paths).unwrap_or_else(|_| path.as_os_str().to_os_string())
 }
 
 /// 确保Android SDK工具可用的Java运行时存在。
@@ -902,7 +915,11 @@ async fn ensure_android_java_runtime(
     let _ = fs::remove_dir_all(&extract_dir);
 
     let Some((runtime, summary)) = probe_managed_java(java_root).await else {
-        bail!("Managed Java runtime was extracted but java -version failed");
+        let java_binary = JavaRuntime::managed_java_binary(java_root);
+        bail!(
+            "Managed Java runtime was extracted but {} could not run. Remove the managed Java runtime from Manage installed content and run one-click install again. If this is a company-managed Mac, ask IT to allow executing this binary.",
+            java_binary.display()
+        );
     };
     emit_log(
         sender,
@@ -1095,7 +1112,10 @@ async fn accept_android_licenses(
     if probe.success {
         Ok(())
     } else {
-        bail!("Android SDK license acceptance failed: {}", probe.summary())
+        bail!(
+            "Android SDK license acceptance failed: {}",
+            android_tool_failure_summary("sdkmanager", &probe, Some(java_runtime))
+        )
     }
 }
 
@@ -1127,7 +1147,7 @@ async fn install_android_packages(
     } else {
         bail!(
             "sdkmanager package installation failed: {}",
-            probe.summary()
+            android_tool_failure_summary("sdkmanager", &probe, Some(java_runtime))
         )
     }
 }
@@ -1225,13 +1245,13 @@ async fn ensure_android_avd(
 
         bail!(
             "avdmanager failed to create Android virtual device: {}",
-            fallback_probe.summary()
+            android_tool_failure_summary("avdmanager", &fallback_probe, Some(java_runtime))
         );
     }
 
     bail!(
         "avdmanager failed to create Android virtual device: {}",
-        create_probe.summary()
+        android_tool_failure_summary("avdmanager", &create_probe, Some(java_runtime))
     )
 }
 
@@ -1253,7 +1273,7 @@ async fn tool_check(
     name: &str,
     path: Option<PathBuf>,
     args: &[&str],
-    envs: &[(&str, &Path)],
+    envs: &[ToolEnv],
 ) -> DoctorCheck {
     match path {
         Some(path) => {
@@ -1268,7 +1288,7 @@ async fn tool_check(
                 format!(
                     "{name} probe failed at {}: {}",
                     path.display(),
-                    probe.summary()
+                    android_tool_failure_summary(name, &probe, None)
                 )
             };
 
@@ -1284,6 +1304,41 @@ async fn tool_check(
             detail: format!("{name} was not found in the configured SDK root or PATH"),
         },
     }
+}
+
+/// 把Android工具里常见的Java定位失败转换成可执行的修复说明。
+fn android_tool_failure_summary(
+    tool_name: &str,
+    probe: &CommandProbe,
+    java_runtime: Option<&JavaRuntime>,
+) -> String {
+    let summary = probe.summary();
+    if !is_android_java_runtime_error(probe) {
+        return summary;
+    }
+
+    let runtime_hint = match java_runtime {
+        Some(JavaRuntime::Managed { java_home }) => format!(
+            "Simdock tried to use managed Java at {}. Remove the managed Java runtime from Manage installed content and run one-click install again. If this is a company-managed Mac, ask IT to allow executing {}.",
+            java_home.display(),
+            JavaRuntime::managed_java_binary(java_home).display()
+        ),
+        _ => "Simdock could not use a Java runtime for Android SDK tools. Run one-click install again so Simdock can provision managed Java. If this is a company-managed Mac, ask IT to allow Simdock's managed Java runtime under ~/Library/Application Support/com.simdock.Simdock/java-runtime.".to_string(),
+    };
+
+    format!(
+        "{tool_name} could not locate or execute Java. {runtime_hint} Original output: {summary}"
+    )
+}
+
+/// 识别macOS和Android命令行工具输出中的Java缺失/不可执行错误。
+fn is_android_java_runtime_error(probe: &CommandProbe) -> bool {
+    let output = format!("{}\n{}", probe.stdout, probe.stderr).to_lowercase();
+    output.contains("unable to locate a java runtime")
+        || output.contains("no java runtime present")
+        || output.contains("could not find java")
+        || output.contains("could not find a valid java")
+        || output.contains("java_home is not defined correctly")
 }
 
 /// 运行PATH中的命令并收集输出。
@@ -1310,13 +1365,13 @@ async fn run_path_command(program: &Path, args: &[&str]) -> CommandProbe {
 async fn run_path_command_with_env(
     program: &Path,
     args: &[&str],
-    envs: &[(&str, &Path)],
+    envs: &[ToolEnv],
 ) -> CommandProbe {
     finish_probe({
         let mut command = Command::new(program);
         command.args(args);
         for (key, value) in envs {
-            command.env(key, value);
+            command.env(*key, value);
         }
         command
     })
@@ -1327,7 +1382,7 @@ async fn run_path_command_with_env(
 async fn run_command_streamed(
     program: &str,
     args: &[String],
-    envs: &[(&str, &Path)],
+    envs: &[ToolEnv],
     task_id: &str,
     sender: Option<&TaskSender>,
 ) -> CommandProbe {
@@ -1335,7 +1390,7 @@ async fn run_command_streamed(
     command.args(args);
 
     for (key, value) in envs {
-        command.env(key, value);
+        command.env(*key, value);
     }
 
     finish_probe_streamed(command, program, args, None, task_id, sender).await
@@ -1345,7 +1400,7 @@ async fn run_command_streamed(
 async fn run_path_command_streamed_with_input(
     program: &Path,
     args: &[String],
-    envs: &[(&str, &Path)],
+    envs: &[ToolEnv],
     input: Option<String>,
     task_id: &str,
     sender: Option<&TaskSender>,
@@ -1354,7 +1409,7 @@ async fn run_path_command_streamed_with_input(
     command.args(args);
 
     for (key, value) in envs {
-        command.env(key, value);
+        command.env(*key, value);
     }
 
     let program_label = program.display().to_string();

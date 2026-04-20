@@ -73,6 +73,12 @@ Build a macOS `.app` bundle and `.dmg` with Simdock icons:
 ./scripts/package-macos.sh
 ```
 
+Build a macOS `.pkg` installer:
+
+```bash
+./scripts/package-macos-pkg.sh
+```
+
 ## Project Layout
 
 ```text
@@ -92,6 +98,8 @@ scripts/
   run-desktop.sh      Desktop development runner.
   build-release.sh    Release build helper.
   package-macos.sh    macOS app bundle and DMG packaging helper.
+  package-macos-pkg.sh
+                      macOS PKG installer packaging helper.
   size-report.sh      Release binary size helper.
 ```
 

@@ -28,6 +28,25 @@ The macOS packaging script:
 - Adds a Finder custom icon to the generated `.dmg` file when macOS icon tools are available.
 - Adds an `/Applications` symlink for drag-and-drop installation.
 
+## macOS PKG
+
+```bash
+./scripts/package-macos-pkg.sh
+```
+
+The PKG packaging script:
+
+- Reads the app version from the root `Cargo.toml`.
+- Builds `target/macos/Simdock.app`.
+- Creates `target/macos/Simdock-<version>.pkg`.
+- Installs `Simdock.app` into `/Applications`.
+
+Create a signed installer package by passing a Developer ID Installer identity:
+
+```bash
+PKG_SIGN_IDENTITY="Developer ID Installer: Your Name (TEAMID)" ./scripts/package-macos-pkg.sh
+```
+
 ## Size Report
 
 ```bash
