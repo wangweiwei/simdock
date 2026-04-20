@@ -1519,6 +1519,14 @@ fn is_terminal_progress_noise(line: &str) -> bool {
         || line.starts_with("Dload Upload")
         || line == "Total    % Received % Xferd  Average Speed   Time    Time     Time  Current"
         || line == "Speed"
+        || is_android_tool_wrapper_noise(line)
+}
+
+/// Android命令行工具的shell wrapper偶尔会把无害的判断表达式警告写到
+/// stderr；命令仍会继续执行，GUI里不应该把这类噪声展示成失败。
+fn is_android_tool_wrapper_noise(line: &str) -> bool {
+    (line.contains("sdkmanager: line") || line.contains("avdmanager: line"))
+        && line.contains("integer expression expected")
 }
 
 /// 在Android SDK的cmdline-tools目录中查找工具。

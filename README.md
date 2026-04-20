@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/brand/png/simdock-app-icon-256.png" alt="Simdock logo" width="112" height="112">
+</p>
+
 # Simdock
 
 [中文](README.zh-CN.md)
@@ -15,6 +19,10 @@ The desktop app is built with `iced`. The CLI is designed for automation, script
 - Switch between Chinese and English.
 - Switch between light, dark, and system themes.
 - Use CLI commands for automation and future CI integration.
+
+## Screenshots
+
+Screenshots are not committed yet. Store release-ready PNG screenshots under `assets/screenshots/`, then reference them from this section with relative Markdown image paths.
 
 ## Quick Start
 

@@ -44,6 +44,7 @@ const SYSTEM_MONO_FONT_PATHS: &[&str] = &[
 ];
 const LANGUAGE_OPTIONS: [AppLanguage; 2] = [AppLanguage::Chinese, AppLanguage::English];
 const STEPPER_DOT_SIZE: u16 = 6;
+const STEPPER_ACTIVE_DOT_SIZE: u16 = 18;
 const STEPPER_LINE_HEIGHT: u16 = 1;
 const STEPPER_NODE_WIDTH: u16 = 112;
 const STEPPER_EDGE_INSET: u16 = 0;
@@ -1295,12 +1296,12 @@ fn install_stage_stepper(
         let left_connector = if index == 0 {
             None
         } else {
-            Some(stage_connector_state(states[index - 1]))
+            Some(completed_connector_state(states[index - 1]))
         };
         let right_connector = if index + 1 == titles.len() {
             None
         } else {
-            Some(stage_connector_state(states[index]))
+            Some(completed_connector_state(states[index]))
         };
 
         track = track.push(install_stage_node(
@@ -1312,7 +1313,7 @@ fn install_stage_stepper(
         labels = labels.push(install_stage_label_node(titles[index], states[index], dark));
 
         if index + 1 < titles.len() {
-            let connector_state = stage_connector_state(states[index]);
+            let connector_state = completed_connector_state(states[index]);
             track = track.push(install_stage_segment(connector_state));
             labels = labels.push(install_stage_gap());
         }
@@ -1328,9 +1329,9 @@ fn install_stage_stepper(
         .into()
 }
 
-fn stage_connector_state(state: StepVisualState) -> StepVisualState {
-    if matches!(state, StepVisualState::Done | StepVisualState::Active) {
-        state
+fn completed_connector_state(state: StepVisualState) -> StepVisualState {
+    if matches!(state, StepVisualState::Done) {
+        StepVisualState::Done
     } else {
         StepVisualState::Pending
     }
@@ -1357,6 +1358,21 @@ fn install_stage_node(
 }
 
 fn install_stage_dot(state: StepVisualState, spinner_frame: usize) -> Element<'static, Message> {
+    if state == StepVisualState::Active {
+        return container(
+            container(text(""))
+                .width(STEPPER_DOT_SIZE)
+                .height(STEPPER_DOT_SIZE)
+                .style(move |theme| step_dot_style(theme, state, spinner_frame)),
+        )
+        .width(STEPPER_ACTIVE_DOT_SIZE)
+        .height(STEPPER_ACTIVE_DOT_SIZE)
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
+        .style(move |theme| active_step_dot_ring_style(theme, spinner_frame))
+        .into();
+    }
+
     container(text(""))
         .width(STEPPER_DOT_SIZE)
         .height(STEPPER_DOT_SIZE)
@@ -1489,6 +1505,10 @@ fn contains_cjk(value: &str) -> bool {
 }
 
 fn terminal_log_line(log: &str) -> String {
+    if is_terminal_error_log(log) && !is_terminal_stderr_log(log) {
+        return format!("! {}", compact_terminal_paths(log));
+    }
+
     if let Some(command) = log
         .strip_prefix("执行命令：")
         .or_else(|| log.strip_prefix("Running: "))
@@ -1507,7 +1527,7 @@ fn terminal_log_line(log: &str) -> String {
         .strip_prefix("错误输出：")
         .or_else(|| log.strip_prefix("stderr: "))
     {
-        return format!("! {}", compact_terminal_paths(output));
+        return format!("~ {}", compact_terminal_paths(output));
     }
 
     format!("# {}", compact_terminal_paths(log))
@@ -1530,15 +1550,16 @@ fn terminal_log_color(log: &str, dark: bool) -> Color {
         };
     }
 
-    if log.starts_with("错误输出：")
-        || log.starts_with("stderr: ")
-        || log.starts_with("Failed to open ")
-    {
+    if is_terminal_error_log(log) && !is_terminal_stderr_log(log) {
         return if dark {
             Color::from_rgb8(0xFF, 0xA3, 0x91)
         } else {
             Color::from_rgb8(0xB2, 0x47, 0x38)
         };
+    }
+
+    if is_terminal_stderr_log(log) {
+        return terminal_warning_color(dark);
     }
 
     if log.starts_with("输出：") || log.starts_with("stdout: ") {
@@ -1550,6 +1571,27 @@ fn terminal_log_color(log: &str, dark: bool) -> Color {
     }
 
     terminal_muted_color(dark)
+}
+
+fn is_terminal_stderr_log(log: &str) -> bool {
+    log.starts_with("错误输出：") || log.starts_with("stderr: ")
+}
+
+fn is_terminal_error_log(log: &str) -> bool {
+    let lower = log.to_ascii_lowercase();
+    log.starts_with("Failed to open ")
+        || lower.starts_with("failed ")
+        || lower.starts_with("error:")
+        || lower.contains(" failed:")
+        || lower.contains(" failed to ")
+}
+
+fn terminal_warning_color(dark: bool) -> Color {
+    if dark {
+        Color::from_rgb8(0xFF, 0xCE, 0x73)
+    } else {
+        Color::from_rgb8(0x9B, 0x61, 0x00)
+    }
 }
 
 fn terminal_muted_color(dark: bool) -> Color {
@@ -1921,15 +1963,34 @@ fn stepper_card_style(theme: &Theme) -> container::Style {
 
 fn step_dot_style(theme: &Theme, state: StepVisualState, spinner_frame: usize) -> container::Style {
     let is_dark = theme.extended_palette().is_dark;
-    let mut color = step_color(state, is_dark);
-
-    if state == StepVisualState::Active && spinner_frame % 6 >= 3 {
-        color.a = 0.45;
-    }
+    let _ = spinner_frame;
+    let color = step_color(state, is_dark);
 
     container::Style::default()
         .background(color)
         .border(border::rounded(999))
+}
+
+fn active_step_dot_ring_style(theme: &Theme, spinner_frame: usize) -> container::Style {
+    let is_dark = theme.extended_palette().is_dark;
+    let accent = step_color(StepVisualState::Active, is_dark);
+    let alpha = match (spinner_frame / 4) % 3 {
+        0 => 0.12,
+        1 => 0.22,
+        _ => 0.32,
+    };
+    let border_alpha = if is_dark { 0.95 } else { 0.78 };
+
+    container::Style::default()
+        .background(Color { a: alpha, ..accent })
+        .border(
+            border::rounded(999)
+                .color(Color {
+                    a: border_alpha,
+                    ..accent
+                })
+                .width(1.0),
+        )
 }
 
 fn step_connector_style(theme: &Theme, state: StepVisualState) -> container::Style {
