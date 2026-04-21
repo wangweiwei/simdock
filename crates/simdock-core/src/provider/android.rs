@@ -26,6 +26,7 @@ const ANDROID_CMDLINE_TOOLS_URL: &str =
 const ANDROID_CMDLINE_TOOLS_ARCHIVE: &str = "commandlinetools-mac-14742923_latest.zip";
 const MANAGED_JAVA_FEATURE_VERSION: u16 = 21;
 const SDKMANAGER_LICENSE_INPUT_REPEATS: usize = 200;
+const SDKMANAGER_PACKAGE_INSTALL_RETRIES: usize = 1;
 
 type ToolEnv = (&'static str, OsString);
 
@@ -1132,7 +1133,7 @@ async fn install_android_packages(
     let mut args = vec![format!("--sdk_root={}", sdk_root.display())];
     args.extend(packages.iter().cloned());
     let envs = android_tool_envs(sdk_root, avd_root, java_runtime);
-    let probe = run_path_command_streamed_with_input(
+    let mut probe = run_path_command_streamed_with_input(
         sdkmanager,
         &args,
         &envs,
@@ -1143,13 +1144,48 @@ async fn install_android_packages(
     .await;
 
     if probe.success {
-        Ok(())
-    } else {
-        bail!(
-            "sdkmanager package installation failed: {}",
-            android_tool_failure_summary("sdkmanager", &probe, Some(java_runtime))
-        )
+        return Ok(());
     }
+
+    if is_android_sdk_zip_error(&probe) {
+        for attempt in 1..=SDKMANAGER_PACKAGE_INSTALL_RETRIES {
+            emit_log(
+                sender,
+                task_id,
+                "Detected corrupted Android SDK package download; clearing sdkmanager cache before retry",
+            );
+            cleanup_android_sdk_download_state(sdk_root, packages, sender, task_id)?;
+            emit_log(
+                sender,
+                task_id,
+                format!(
+                    "Retrying Android SDK package installation ({attempt}/{SDKMANAGER_PACKAGE_INSTALL_RETRIES})"
+                ),
+            );
+            probe = run_path_command_streamed_with_input(
+                sdkmanager,
+                &args,
+                &envs,
+                Some(sdkmanager_license_input()),
+                task_id,
+                sender,
+            )
+            .await;
+
+            if probe.success {
+                return Ok(());
+            }
+
+            if !is_android_sdk_zip_error(&probe) {
+                break;
+            }
+        }
+    }
+
+    bail!(
+        "sdkmanager package installation failed: {}",
+        android_sdk_package_failure_summary(&probe, java_runtime)
+    )
 }
 
 /// 创建或复用Simdock管理的Android虚拟设备。
@@ -1331,6 +1367,18 @@ fn android_tool_failure_summary(
     )
 }
 
+/// 为SDK包下载损坏提供更明确的失败原因和处理方向。
+fn android_sdk_package_failure_summary(probe: &CommandProbe, java_runtime: &JavaRuntime) -> String {
+    if is_android_sdk_zip_error(probe) {
+        return format!(
+            "Android SDK package download appears corrupted even after retry. This is usually caused by an interrupted download or a company network proxy rewriting the zip file. Try another network, or ask IT to allow Android SDK downloads from dl.google.com/android/repository. Original output: {}",
+            probe.summary()
+        );
+    }
+
+    android_tool_failure_summary("sdkmanager", probe, Some(java_runtime))
+}
+
 /// 识别macOS和Android命令行工具输出中的Java缺失/不可执行错误。
 fn is_android_java_runtime_error(probe: &CommandProbe) -> bool {
     let output = format!("{}\n{}", probe.stdout, probe.stderr).to_lowercase();
@@ -1339,6 +1387,89 @@ fn is_android_java_runtime_error(probe: &CommandProbe) -> bool {
         || output.contains("could not find java")
         || output.contains("could not find a valid java")
         || output.contains("java_home is not defined correctly")
+}
+
+/// 识别sdkmanager下载到损坏zip或准备SDK包失败的场景。
+fn is_android_sdk_zip_error(probe: &CommandProbe) -> bool {
+    let output = format!("{}\n{}", probe.stdout, probe.stderr).to_lowercase();
+    output.contains("error reading zip content from a seekablebytechannel")
+        || output.contains("zip end header not found")
+        || output.contains("not a zip archive")
+        || output.contains("error occurred while preparing sdk package") && output.contains("zip")
+}
+
+/// 清理sdkmanager的临时下载和不完整包目录，供损坏zip自动重试使用。
+fn cleanup_android_sdk_download_state(
+    sdk_root: &Path,
+    packages: &[String],
+    sender: Option<&TaskSender>,
+    task_id: &str,
+) -> Result<()> {
+    let temp_dir = sdk_root.join(".temp");
+    if remove_path_if_exists(&temp_dir)? {
+        emit_log(
+            sender,
+            task_id,
+            format!(
+                "Removed Android SDK temporary download directory: {}",
+                temp_dir.display()
+            ),
+        );
+    }
+
+    for package in packages {
+        let Some(package_dir) = android_package_install_dir(sdk_root, package) else {
+            continue;
+        };
+
+        if package_dir.exists()
+            && !package_dir.join("source.properties").exists()
+            && remove_path_if_exists(&package_dir)?
+        {
+            emit_log(
+                sender,
+                task_id,
+                format!(
+                    "Removed incomplete Android SDK package directory: {}",
+                    package_dir.display()
+                ),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// 将sdkmanager包名映射成SDK目录，避免硬编码system image路径。
+fn android_package_install_dir(sdk_root: &Path, package: &str) -> Option<PathBuf> {
+    let mut path = sdk_root.to_path_buf();
+    let mut has_segment = false;
+
+    for segment in package.split(';').map(str::trim) {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return None;
+        }
+
+        path.push(segment);
+        has_segment = true;
+    }
+
+    has_segment.then_some(path)
+}
+
+/// 删除文件或目录；不存在时视为成功，便于恢复流程幂等重试。
+fn remove_path_if_exists(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+
+    Ok(true)
 }
 
 /// 运行PATH中的命令并收集输出。
